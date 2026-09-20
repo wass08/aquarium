@@ -1,7 +1,7 @@
 import { chromium } from 'playwright';
 import { mkdir, writeFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { verifyCameraPersistence } from './lab/camera-persist.mjs';
+import { verifyCameraPersistence } from './lab-camera-persist.mjs';
 await mkdir('verify/lab', { recursive: true });
 const logs = [], errors = [], summary = [], physicsEvidence = [];
 const browser = await chromium.launch({ executablePath: chromium.executablePath(), headless: true, args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan,UseSkiaRenderer', '--use-angle=metal', '--ignore-gpu-blocklist'] });
@@ -43,7 +43,7 @@ const ready = async (bench, level) => {
 };
 let failed;
 try {
-  let first = true, randomMinDistance;
+  let first = true;
   for (const bench of ['terrain', 'caustics', 'shatter']) for (const level of [1, 2, 3]) {
     const hash = `#/lab/${bench}?level=${level}`;
     if (first) { await page.goto(base + hash); first = false; }
@@ -67,24 +67,48 @@ try {
         const step = size / (side.length - 1);
         assert.ok(side.every((v, i) => Math.abs(v - lo - i * step) < tolerance), 'Boundary ring is evenly spaced');
       }
-      if (level === 1) {
-        assert.equal(axes[0].length * axes[1].length, seedCount, 'L1 fills its lattice');
+      if (level < 3) {
+        assert.equal(benchState.smooth, level === 1, 'Smooth defaults only on the dense grid');
+        assert.equal(benchState.sampling, 'grid');
+        assert.equal(seedCount, level === 1 ? 29929 : 1521, 'Dense count does not leak into coarse grid');
+        assert.equal(axes[0].length * axes[1].length, seedCount, 'Grid fills its lattice');
         assert.equal(new Set(points.map(p => p.join(','))).size, seedCount, 'No duplicate lattice vertices');
         for (const axis of axes) {
-          assert.ok(axis.length <= Math.sqrt(seedCount) + 1, 'L1 has a low-resolution regular lattice');
-          assert.ok(axis.every((v, i) => Math.abs(v - lo - i * size / (axis.length - 1)) < tolerance), 'L1 lattice is evenly spaced');
+          assert.ok(axis.length <= Math.sqrt(seedCount) + 1, 'Grid is a square lattice');
+          assert.ok(axis.every((v, i) => Math.abs(v - lo - i * size / (axis.length - 1)) < tolerance), 'Grid lattice is evenly spaced');
         }
-        await page.evaluate(() => { window.terrainHeightAt = window.lab.state.heightAt; });
+        if (level === 1) {
+          await page.evaluate(() => { window.terrainHeightAt = window.lab.state.heightAt; });
+          const fps = await page.evaluate(async () => {
+            const samples = [];
+            for (let i = 0; i < 120; i++) { await new Promise(requestAnimationFrame); samples.push(parseInt(document.querySelector('.lab-fps').textContent)); }
+            samples.sort((a, b) => a - b); return samples[Math.floor(samples.length / 2)];
+          });
+          summary.push(`Terrain L1 default: ${seedCount} vertices, ${triangleCount} triangles, median on-screen ${fps} FPS (1600×1000).`);
+          await page.evaluate(() => window.lab.setReveal({ wireframe: true })); await page.waitForTimeout(350); await capture('terrain-L1-wireframe');
+          await page.evaluate(() => window.lab.setReveal({ wireframe: false }));
+        }
       } else {
         // The straight boundary ring is appended after sampling and is not Poisson-excluded.
         let minDistance = Infinity;
         for (let i = 0; i < interior.length; i++) for (let j = 0; j < i; j++) minDistance = Math.min(minDistance, Math.hypot(interior[i][0] - interior[j][0], interior[i][1] - interior[j][1]));
-        if (level === 2) { assert.ok(axes[0].length > seedCount * .9, 'L2 points are not on a lattice'); randomMinDistance = minDistance; }
-        else {
-          const minimumRadius = size / Math.sqrt(benchState.count) * 1.05 / Math.sqrt(4.25);
-          assert.ok(minDistance >= minimumRadius - tolerance, 'L3 respects the smallest slope-weighted Poisson radius');
-          assert.ok(randomMinDistance < .5 * minDistance, 'L2 clumps are closer than L3 samples');
-        }
+        assert.equal(benchState.sampling, 'poisson'); assert.equal(benchState.smooth, false);
+        assert.equal(benchState.count, 1500, 'Dense count does not leak into Poisson');
+        const minimumRadius = size / Math.sqrt(benchState.count) * 1.05 / Math.sqrt(4.25);
+        assert.ok(minDistance >= minimumRadius - tolerance, 'L3 respects the smallest slope-weighted Poisson radius');
+        await page.evaluate(() => window.lab.setReveal({ sampling: 'random' })); await page.waitForTimeout(350);
+        const random = await state();
+        assert.equal(random.sampling, 'random'); assert.equal(random.seedCount, random.count + 4 * Math.ceil(Math.sqrt(random.count)));
+        const randomPoints = Array.from({ length: random.count }, (_, i) => random.seedCoordinates.slice(i * 2, i * 2 + 2));
+        assert.ok(new Set(randomPoints.map(p => p[0])).size > random.count * .9, 'Random points are not on a lattice');
+        let randomMinDistance = Infinity;
+        for (let i = 0; i < randomPoints.length; i++) for (let j = 0; j < i; j++) randomMinDistance = Math.min(randomMinDistance, Math.hypot(randomPoints[i][0] - randomPoints[j][0], randomPoints[i][1] - randomPoints[j][1]));
+        assert.ok(randomMinDistance < .5 * minDistance, 'Random clumps are closer than Poisson samples');
+        await capture('terrain-L3-random');
+        await page.evaluate(() => window.lab.setReveal({ sampling: 'poisson' }));
+        assert.deepEqual((await state()).meshPositions, benchState.meshPositions, 'Returning to Poisson restores the exact geometry');
+      }
+      {
         const heightErrors = await page.evaluate(() => {
           const { heightAt, meshPositions } = window.lab.state, errors = [];
           for (let i = 0; i < 8; i++) {
@@ -93,17 +117,30 @@ try {
           }
           return errors;
         });
-        assert.ok(heightErrors.every(error => error < tolerance), 'L1 and current height fields match L2/L3 mesh vertices within 1e-6');
+        assert.ok(heightErrors.every(error => error < tolerance), 'Every level samples the same analytic field within 1e-6');
       }
+    }
+    if (bench === 'terrain') {
+      await page.evaluate(smooth => window.lab.setReveal({ smooth }), !benchState.smooth);
+      assert.equal((await state()).smooth, !benchState.smooth);
+      assert.deepEqual((await state()).meshPositions, benchState.meshPositions, 'Smooth reveal preserves geometry');
+      await page.evaluate(smooth => window.lab.setReveal({ smooth }), benchState.smooth);
     }
     if (bench === 'terrain' && level === 3) {
       await page.evaluate(() => window.lab.setReveal({ wireframe: true, seeds: true })); await page.waitForTimeout(350); await capture('terrain-L3-reveal');
-      await page.evaluate(() => window.lab.setReveal({ circumcircles: true })); await page.waitForTimeout(200);
-      await page.evaluate(() => window.lab.setReveal({ circumcircles: false }));
     }
-    if (bench === 'caustics' && level === 3) {
-      await page.evaluate(() => window.lab.setReveal({ rawField: true, freeze: true })); await page.waitForTimeout(350); await capture('caustics-L3-raw');
+    if (bench === 'caustics') {
+      const parameters = await page.locator('.lab-pane').innerText();
+      assert.ok(parameters.includes('scaleA') && parameters.includes('intensity') && parameters.includes('cell seeds'));
+      assert.equal(parameters.includes('scaleB'), level === 3);
+      assert.equal(parameters.includes('rgb offset'), level === 3);
+      assert.equal(parameters.includes('sharpness'), level >= 2);
+      assert.ok(!parameters.includes('sine'));
+      const moving = benchState.elapsed; await page.waitForTimeout(150);
+      assert.ok((await state()).elapsed > moving, 'Animated features share the simulation clock');
+      await page.evaluate(() => window.lab.setReveal({ rawField: true, freeze: true })); await page.waitForTimeout(350); await capture(`caustics-L${level}-raw`);
       const frozen = await page.evaluate(() => window.lab.state.elapsed); await page.waitForTimeout(200); assert.equal(await page.evaluate(() => window.lab.state.elapsed), frozen);
+      await page.evaluate(() => window.lab.setReveal({ rawField: false, freeze: false }));
     }
     if (bench === 'shatter') {
       await page.evaluate(() => window.lab.setReveal({ seeds: true, outlines: true })); await page.waitForTimeout(200); await capture(`shatter-L${level}-pattern`);
@@ -163,7 +200,7 @@ try {
     summary.push(`PASS ${bench} L${level}: WebGPU ready, screenshot captured${bench === 'shatter' ? ', click / physics / freeze / reset verified' : ''}`);
     console.log(summary.at(-1));
   }
-  await verifyCameraPersistence(page, ready, state, summary);
+  await verifyCameraPersistence(page, ready, summary);
   // Warm the same shader variants used by the cycles before comparing allocations.
   await page.evaluate(() => { location.hash = '#/lab/caustics?level=2'; }); await ready('caustics', 2);
   await page.evaluate(() => { location.hash = '#/lab/terrain?level=1'; }); await ready('terrain', 1);
@@ -197,7 +234,7 @@ try {
   await page.waitForFunction(() => document.documentElement.dataset.status === 'ready' && window.aquarium, null, { timeout: 90000 });
   await page.waitForTimeout(1800); await capture('main');
   assert.equal(await page.evaluate(() => window.aquarium.renderer), 'WebGPU'); assert.equal(await page.locator('h1').textContent(), 'Aquarium');
-  await page.locator('.enter-lab').click(); await ready('terrain', 3);
+  await page.locator('.enter-lab').click(); await ready('terrain', 1);
   assert.deepEqual(errors, [], 'No console errors, uncaught exceptions or shader errors');
   summary.push('PASS aquarium renders; both page links, Lab navigation and keyboard levels work.');
   summary.push(`Console: ${errors.length} errors; ${logs.filter(x => x.startsWith('[warning]')).length} warnings.`);

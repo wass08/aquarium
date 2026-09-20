@@ -69,13 +69,13 @@ Open `#/lab` (redirects to terrain), or use **Enter the Lab** in the aquarium. D
 
 | Bench | Level 1 | Level 2 | Level 3 |
 | --- | --- | --- | --- |
-| Terrain | Random positions and heights | Same positions, simplex fBm heights | Slope-weighted Bridson Poisson-disk sampling, ridged fBm, valley power curve, Delaunay facets |
-| Caustics | Flat floor colour | Static, broad Worley F1 field | Two counter-scrolling F2 − F1 layers, sharpened RGB light lines, water-depth fade |
+| Terrain | Dense grid, smooth shading: per-pixel height/slope colour bands | Low-poly grid, flat shading: per-face biomes | Poisson-disk + Delaunay: slope-weighted sampling, flat facets; random sampling comparison |
+| Caustics | Worley F1: animated cells, cubed into soft blobs | F2 − F1: the same animated layer, inverted and sharpened into Voronoi edges | Two counter-scrolling F2 − F1 layers, sharpened RGB light lines, water-depth fade |
 | Shatter | Identical rectangular tiles | Uniform random Voronoi shards | Dense impact core, radial rings, outer-only Lloyd relaxation, outward impulses |
 
-Terrain reveals: wireframe, seeds, circumcircles (first 1,500 triangles; very large boundary circles omitted), biome boundaries, sea level. The seed-count control is approximate for saturated variable-radius Poisson sampling; boundary samples are additional. Terrain auto-orbits until you drag.
+Terrain reveals: wireframe, seeds, biome regions, sea level, and **smooth shading** at every level (on by default only at L1). L3 adds **sampling: poisson / random**, also available as `window.lab.setReveal({ sampling: 'random' })`. All levels sample the same analytic height field. L1 defaults to 29,929 vertices (173×173, count control 2,000–40,000); its seed reveal subsamples to at most 2,000 dots, while wireframe shows every triangle. L2 defaults to 1,521 vertices (39×39). L1's dense count persists separately from the shared L2/L3 count (200–4,000); smooth shading persists separately per level. Other terrain settings and the camera continue across level changes. Poisson counts are approximate; boundary samples are additional. Terrain auto-orbits until you drag.
 
-Caustics reveals: raw F1, feature points, layer isolation, freeze; all shader motion uses an explicit simulation clock. Shatter reveals work on the intact pane. Click to fracture, use freeze or 0.15× slow motion to inspect, and **R / Reset pane** to restore. Shards use Rapier convex hulls and remain on the floor after settling.
+Caustics reveals: L1 raw F1, cell seeds, freeze; L2 raw F2 − F1, cell seeds, freeze; L3 raw F1, cell seeds, layer isolation, freeze. L1 exposes scale A, speed, intensity and water level; L2 adds sharpness; L3 adds scale B and RGB offset. L1/L2 keep a flat teal base with no depth fade. All shader motion uses an explicit simulation clock. Shatter reveals work on the intact pane. Click to fracture, use freeze or 0.15× slow motion to inspect, and **R / Reset pane** to restore. Shards use Rapier convex hulls and remain on the floor after settling.
 
 ### Shared library and ownership
 
@@ -85,7 +85,7 @@ Caustics reveals: raw F1, feature points, layer isolation, freeze; all shader mo
 - `noise.ts`: seeded simplex, normalized fBm, ridged octaves, and terrain height shaping.
 - `poisson.ts`: Bridson sampling with symmetric variable-radius exclusion and explicit minimum/maximum radii.
 - `triangulate.ts`: Delaunay, clipped Voronoi polygons, polygon centroids, masked Lloyd relaxation, circumcircles.
-- `terrain.ts`: non-indexed geometry, seed x/z pairs, heights, Delaunay topology, per-vertex biome labels, blended biome weights and slope attributes. Optional domain warping, thermal erosion and island shaping precede neighbourhood classification. The optional mask multiplies heights.
+- `terrain.ts`: non-indexed geometry, seed x/z pairs, heights, Delaunay topology, per-vertex biome labels, blended biome weights and slope attributes. Optional domain warping, thermal erosion and island shaping precede neighbourhood classification. The optional mask multiplies heights. `generateTerrain` keeps `level: 1 | 2 | 3`; `sampling: 'poisson' | 'random'` selects L3 sampling, and `smooth` overrides the level's normal default without changing geometry or per-face attributes.
 - `worley.ts`: GPU TSL F1/F2/seed masks and three-level caustic composition. Create uniforms with `createCausticsUniforms()`, pass a caller-owned time uniform, and call `params.advance(time, simulationDt)` to honor freeze. Layer values are 0=both, 1=A, 2=B. The field returns an additive RGB light contribution; raw/seeds are diagnostic overrides.
 - `shatter.ts`: pane-local x/y fracture cells, centroid-centred extrusions, outlines, seed geometries. Caller owns/disposes returned geometries.
 - `physics.ts`: exported `physicsReady` promise, independent async `createPhysicsWorld()`, fixed steps (120 Hz by default, 60 Hz for the shared shard worlds), time scale, freeze, transform sync, disposal. `addShard` expects a unit-scale mesh whose position/quaternion are world-space; static box sizes are full extents.

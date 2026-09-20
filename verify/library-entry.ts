@@ -1,7 +1,7 @@
 import { TANK } from '../src/state';
 import { WATER_SPECTRUM, WATER_SCALE } from '../src/lib/waves';
 import assert from 'node:assert/strict';
-import { generateTerrain, generateIslandTerrain } from '../src/lib/terrain';
+import { generateTerrain, generateIslandTerrain, setTerrainSmooth } from '../src/lib/terrain';
 import { createNoise2D, terrainHeight } from '../src/lib/noise';
 import { ISLAND_SEED } from '../src/scene/island';
 import { generateShatterPattern, buildShardGeometry, groupAdjacentCells, insetCell } from '../src/lib/shatter';
@@ -12,43 +12,79 @@ import { BoxGeometry, Mesh, MeshBasicMaterial, Vector3, Quaternion } from 'three
 import RAPIER from '@dimforge/rapier3d-compat';
 import { createAudio } from '../src/audio';
 const options = { size: 14, count: 1500, seed: 42, amplitude: 4.2 };
-const terrain = [1, 2, 3].map(level => generateTerrain({ ...options, level: level as 1 | 2 | 3 }));
-assert.notDeepEqual(terrain[0].seeds, terrain[1].seeds, 'Grid and random sampling differ');
+const terrainOptions = [
+  { ...options, level: 1 as const, count: 30000 },
+  { ...options, level: 2 as const },
+  { ...options, level: 3 as const },
+  { ...options, level: 3 as const, sampling: 'random' as const },
+];
+const terrain = terrainOptions.map(generateTerrain);
+assert.notDeepEqual(terrain[0].seeds, terrain[1].seeds, 'Dense and coarse grids differ');
+assert.notDeepEqual(terrain[2].seeds, terrain[3].seeds, 'Poisson and random sampling differ');
+assert.equal(terrain[3].heights.length, options.count + 4 * Math.ceil(Math.sqrt(options.count)));
+const interior = (t: typeof terrain[number]) => Array.from({ length: t.heights.length }, (_, i) => [t.delaunay.points[i * 2], t.delaunay.points[i * 2 + 1]]).filter(p => p.every(v => Math.abs(v) < options.size / 2));
+const minimumDistance = (points: number[][]) => { let min = Infinity; for (let i = 0; i < points.length; i++) for (let j = 0; j < i; j++) min = Math.min(min, Math.hypot(points[i][0] - points[j][0], points[i][1] - points[j][1])); return min; };
+const poissonMin = minimumDistance(interior(terrain[2]));
+assert.ok(poissonMin >= options.size / Math.sqrt(options.count) * 1.05 / Math.sqrt(4.25) - 1e-6);
+assert.ok(minimumDistance(interior(terrain[3])) < poissonMin * .5, 'Random sampling retains clumps');
 const noise = createNoise2D(options.seed);
 for (const [index, t] of terrain.entries()) {
-  const repeat = generateTerrain({ ...options, level: (index + 1) as 1 | 2 | 3, erosion: 8, carve: 420 });
+  const repeat = generateTerrain({ ...terrainOptions[index], erosion: 8, carve: 420 });
   assert.deepEqual(t.seeds, repeat.seeds, 'Sampling is seeded');
   assert.deepEqual(t.heights, repeat.heights, 'Lab disables mesh-dependent erosion and carving');
   repeat.geometry.dispose();
+  const expectedNeighbours = Array.from({ length: t.heights.length }, () => new Set<number>());
+  for (let e = 0; e < t.delaunay.triangles.length; e += 3) {
+    const ids = t.delaunay.triangles.slice(e, e + 3);
+    for (const i of ids) for (const j of ids) if (i !== j) expectedNeighbours[i].add(j);
+  }
   for (let i = 0; i < t.heights.length; i++) {
     const x = t.delaunay.points[i * 2], z = t.delaunay.points[i * 2 + 1];
     assert.equal(t.heights[i], Math.fround(terrainHeight(x, z, { noise, amplitude: options.amplitude, frequency: 1.5 / options.size })), 'Every level samples the same analytic field');
-    const neighbours = new Set<number>();
-    for (let e = 0; e < t.delaunay.triangles.length; e++) if (t.delaunay.triangles[e] === i) {
-      const start = Math.floor(e / 3) * 3;
-      for (let j = start; j < start + 3; j++) if (t.delaunay.triangles[j] !== i) neighbours.add(t.delaunay.triangles[j]);
-    }
-    assert.deepEqual(new Set(t.delaunay.neighbors(i)), neighbours, 'Reveal topology matches mesh neighbours');
+    assert.deepEqual(new Set(t.delaunay.neighbors(i)), expectedNeighbours[i], 'Reveal topology matches mesh neighbours');
   }
   assert.equal(t.diagnostics.thermalChange.changed, 0);
   assert.equal(t.diagnostics.carveChange.changed, 0);
   assert.equal(t.geometry.index, null);
   for (const value of t.geometry.getAttribute('position').array) assert.ok(Number.isFinite(value));
-  assert.ok(Math.min(...Array.from(t.geometry.getAttribute('normal').array).filter((_, i) => i % 3 === 1)) >= 0);
+  assert.ok(Array.from(t.geometry.getAttribute('normal').array).every((n, i) => i % 3 !== 1 || n >= 0));
 }
-const grid = terrain[0], segments = Math.round(Math.sqrt(options.count)) - 1;
-assert.equal(grid.heights.length, (segments + 1) ** 2);
-assert.equal(grid.biome.length / 3, 2 * segments ** 2);
-const gridCircles = circumcircles(grid.delaunay);
-assert.equal(gridCircles.length, 2 * segments ** 2, 'Co-circular grid triangles retain their circles');
-for (let i = 0; i < gridCircles.length; i += 2) {
-  assert.ok(Math.hypot(...gridCircles[i].center.map((v, j) => v - gridCircles[i + 1].center[j])) < 1e-10);
-  assert.ok(Math.abs(gridCircles[i].radius - options.size / segments / Math.SQRT2) < 1e-10);
+for (const grid of terrain.slice(0, 2)) {
+  const segments = Math.sqrt(grid.heights.length) - 1;
+  assert.equal(grid.heights.length, (segments + 1) ** 2);
+  assert.equal(grid.biome.length / 3, 2 * segments ** 2);
+  const gridCircles = circumcircles(grid.delaunay);
+  assert.equal(gridCircles.length, 2 * segments ** 2, 'Co-circular grid triangles retain their circles');
+  for (let i = 0; i < gridCircles.length; i += 2) {
+    assert.ok(Math.hypot(...gridCircles[i].center.map((v, j) => v - gridCircles[i + 1].center[j])) < 1e-10);
+    assert.ok(Math.abs(gridCircles[i].radius - options.size / segments / Math.SQRT2) < 1e-10);
+  }
 }
-for (const count of [200, 900, 4000]) {
-  const sampled = generateTerrain({ ...options, level: 1, count });
+for (const level of [1, 2] as const) for (const count of level === 1 ? [2000, 30000, 40000] : [200, 900, 4000]) {
+  const sampled = generateTerrain({ ...options, level, count });
   assert.equal(sampled.heights.length, Math.round(Math.sqrt(count)) ** 2, 'Seed slider controls grid resolution');
   sampled.geometry.dispose();
+}
+// Averaging normals must preserve every position and biome attribute, and be reversible.
+for (const t of terrain) {
+  const positions = t.geometry.getAttribute('position').array.slice();
+  const weights = t.geometry.getAttribute('biomeWeights').array.slice();
+  setTerrainSmooth(t.geometry, false);
+  const flat = t.geometry.getAttribute('normal').array.slice();
+  for (let i = 0; i < flat.length; i += 9) for (let j = 0; j < 3; j++) {
+    assert.equal(flat[i + j], flat[i + 3 + j]); assert.equal(flat[i + j], flat[i + 6 + j]);
+  }
+  setTerrainSmooth(t.geometry, true);
+  const normals = t.geometry.getAttribute('normal').array, seen = new Map<string, number[]>();
+  for (let i = 0; i < positions.length; i += 3) {
+    const key = Array.from(positions.slice(i, i + 3)).join(','), n = Array.from(normals.slice(i, i + 3));
+    if (seen.has(key)) assert.deepEqual(n, seen.get(key)); else seen.set(key, n);
+    assert.ok(Math.abs(Math.hypot(...n) - 1) < 1e-6);
+  }
+  assert.notDeepEqual(normals, flat);
+  assert.deepEqual(t.geometry.getAttribute('position').array, positions);
+  assert.deepEqual(t.geometry.getAttribute('biomeWeights').array, weights);
+  setTerrainSmooth(t.geometry, false); assert.deepEqual(t.geometry.getAttribute('normal').array, flat);
 }
 const masked = generateTerrain({ ...options, level: 3, mask: () => 0 }); assert.ok(masked.heights.every(h => h === 0));
 const poisson = poissonDisk({ bounds: [-2, -2, 2, 2], seed: 9, minRadius: 0.12, maxRadius: 0.3, radius: x => 0.12 + (x + 2) / 4 * 0.18 });

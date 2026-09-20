@@ -3,7 +3,10 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { state, TANK } from './state';
 
 export function createCamera(canvas: HTMLCanvasElement) {
-  const camera = new PerspectiveCamera(39, innerWidth / innerHeight, 0.1, 2000);
+  // The floor fades into the background by 65 units, so pulling far in from 2000 costs nothing
+  // visible and buys ~17x the depth precision the millimetric pond film needs against the floor.
+  // Near stays at 0.1: minDistance 3 puts the camera inside a 7.6-wide tank at full zoom.
+  const camera = new PerspectiveCamera(39, innerWidth / innerHeight, 0.1, 120);
   camera.position.set(10.8, 7.7, 14.8);
   const controls = new OrbitControls(camera, canvas);
   controls.target.set(0, 1.85, 0); controls.enableDamping = true; controls.dampingFactor = 0.07;

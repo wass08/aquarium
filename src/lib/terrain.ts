@@ -3,7 +3,7 @@ import { random } from './random';
 import { createNoise2D, terrainHeight } from './noise';
 import { poissonDisk } from './poisson';
 import { delaunayFrom, type Point2 } from './triangulate';
-export type TerrainOptions = { level: 1 | 2 | 3; size: number; count: number; seed: number; amplitude: number; mask?: (x: number, y: number) => number; warp?: number; erosion?: number; island?: boolean; carve?: number };
+export type TerrainOptions = { level: 1 | 2 | 3; size: number; count: number; seed: number; amplitude: number; sampling?: 'poisson' | 'random'; smooth?: boolean; mask?: (x: number, y: number) => number; warp?: number; erosion?: number; island?: boolean; carve?: number };
 const smooth = (a: number, b: number, x: number) => { const t = Math.max(0, Math.min(1, (x-a)/(b-a))); return t*t*(3-2*t); };
 /** Choose one consistent diagonal on the co-circular grid, keeping reveal topology in sync. */
 function gridTriangulation(points: Point2[], segments: number) {
@@ -28,8 +28,25 @@ function gridTriangulation(points: Point2[], segments: number) {
   }
   return delaunay;
 }
-/** Flat-shaded sampling of one analytic Lab field; mesh-based passes belong to the island. */
-export function generateTerrain({ level, size, count, seed, amplitude, mask, warp = 0, erosion = 0, island = false, carve = 0 }: TerrainOptions) {
+/** Switch normals without changing non-indexed topology or per-face biome attributes. */
+export function setTerrainSmooth(geometry: BufferGeometry, enabled: boolean) {
+  geometry.computeVertexNormals();
+  if (!enabled) return;
+  const positions = geometry.getAttribute('position'), normals = geometry.getAttribute('normal');
+  const sums = new Map<string, Vector3>();
+  const keyAt = (i: number) => `${positions.getX(i)},${positions.getY(i)},${positions.getZ(i)}`;
+  for (let i = 0; i < positions.count; i++) {
+    const key = keyAt(i), sum = sums.get(key) ?? new Vector3();
+    sum.x += normals.getX(i); sum.y += normals.getY(i); sum.z += normals.getZ(i); sums.set(key, sum);
+  }
+  for (const sum of sums.values()) sum.normalize();
+  for (let i = 0; i < positions.count; i++) {
+    const n = sums.get(keyAt(i))!; normals.setXYZ(i, n.x, n.y, n.z);
+  }
+  normals.needsUpdate = true;
+}
+/** Sample one analytic Lab field with grid or scattered points; mesh-based passes belong to the island. */
+export function generateTerrain({ level, size, count, seed, amplitude, mask, warp = 0, erosion = 0, island = false, carve = 0, sampling = 'poisson', smooth: smoothShading = level === 1 }: TerrainOptions) {
   if (!island) { erosion = 0; carve = 0; }
   const rng = random(seed), noise = createNoise2D(seed), half = size / 2;
   // A composed prior remains a scalar height field: it changes neither the
@@ -53,25 +70,25 @@ export function generateTerrain({ level, size, count, seed, amplitude, mask, war
   const e = size / 350;
   const slopeAt = (x: number, y: number) => Math.hypot(field(x + e, y) - field(x - e, y), field(x, y + e) - field(x, y - e)) / (2 * e);
   let points: Point2[];
-  // At the default count this is a 38 × 38 grid (1521 vertices).
+  // Both grids share the same diagonal; the Lab supplies a separate dense count for L1.
   const segments = Math.max(1, Math.round(Math.sqrt(count)) - 1);
-  if (level === 1) {
+  if (level < 3) {
     points = Array.from({ length: (segments + 1) ** 2 }, (_, i) => [
       -half + size * (i % (segments + 1)) / segments,
       -half + size * Math.floor(i / (segments + 1)) / segments,
     ]);
-  } else if (level === 3) {
+  } else if (sampling === 'poisson') {
     const base = size / Math.sqrt(count) * 1.05;
     const radius = (x: number, y: number) => base / Math.sqrt(0.65 + Math.min(2, slopeAt(x, y)) * 1.8);
     points = poissonDisk({ bounds: [-half, -half, half, half], radius, minRadius: base / Math.sqrt(4.25), maxRadius: base / Math.sqrt(0.65), seed });
   } else points = Array.from({ length: count }, () => [(rng() - 0.5) * size, (rng() - 0.5) * size]);
-  if (level !== 1) {
+  if (level === 3) {
     const edges = Math.max(8, Math.ceil(Math.sqrt(count)));
     for (let i = 0; i < edges; i++) { const t = -half + size * i / edges; points.push([t, -half], [half, t], [-t, half], [-half, -t]); }
   }
   const heightAt = (x: number, z: number) => field(x, z) * (mask?.(x, z) ?? 1);
   const heights = Float32Array.from(points, ([x, y]) => heightAt(x, y));
-  const delaunay = level === 1 ? gridTriangulation(points, segments) : delaunayFrom(points);
+  const delaunay = level < 3 ? gridTriangulation(points, segments) : delaunayFrom(points);
   const beforeThermal = Float32Array.from(heights);
   const unwarped = Float32Array.from(points, ([x,y]) => field(x,y,0)*(mask?.(x,y)??1));
   // Thermal erosion: conservative transfers to each vertex's lowest Delaunay neighbour.
@@ -188,6 +205,7 @@ export function generateTerrain({ level, size, count, seed, amplitude, mask, war
   const biome=new Float32Array(biomes);
   geometry.setAttribute('biome',new Float32BufferAttribute(biome,1));geometry.setAttribute('biomeWeights',new Float32BufferAttribute(weights,4));geometry.setAttribute('slope',new Float32BufferAttribute(slopes,1));
   geometry.computeVertexNormals();geometry.computeBoundingSphere();
+  if (smoothShading) setTerrainSmooth(geometry, true);
   return {geometry,seeds:new Float32Array(points.flat()),heights,heightAt,delaunay,biome,faces,diagnostics};
 }
 export function generateIslandTerrain(seed:number, options: {warp?:number;erosion?:number;carve?:number} = {}) {

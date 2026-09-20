@@ -106,12 +106,12 @@ export function createSpill(scene: Scene, ripple: (point: Vector3, strength: num
     sheet.frustumCulled=false;sheet.renderOrder=4;scene.add(sheet);
     const puddleGeometry=new PlaneGeometry(2,2);puddleGeometry.rotateX(-Math.PI/2);
     const puddle=new Mesh(puddleGeometry,puddleMaterial);
-    puddle.position.y=STAGE_Y+.002+opening.wall*.0002;puddle.scale.setScalar(.001);
+    puddle.position.y=STAGE_Y+.015+opening.wall*.0002;puddle.scale.setScalar(.001);
     // Pond first, then water (3), cracks/sheets (4), and loose glass (5).
     // Depth remains read-only: floor occlusion survives, without covering resting shards.
     puddle.renderOrder=-4+opening.wall*.01;
     Object.assign(puddle.userData,{floorPond:true,wall:opening.wall,pondOrder:puddle.renderOrder});
-    puddle.material.polygonOffset=true;puddle.material.polygonOffsetFactor=-1;puddle.material.polygonOffsetUnits=-1;
+    puddle.material.polygonOffset=true;puddle.material.polygonOffsetFactor=-4;puddle.material.polygonOffsetUnits=-8;
     const head = Math.max(0, waterHeight.value - opening.bottom);
     const landingDistance = Math.sqrt(2 * 9.81 * head) * 0.55 * Math.sqrt(Math.max(0.01, Math.min(opening.point.y, waterHeight.value) - STAGE_Y) * 2 / 9.81) + 0.38;
     puddle.position.x = opening.point.x + opening.normal.x * landingDistance;
