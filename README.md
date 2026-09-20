@@ -1,5 +1,9 @@
 # Aquarium — Wawa Sensei
 
+**Watch the video: [Three problems. One word.](https://youtu.be/ywYOIk3rgHw)** — *You can't prompt what you can't name*, episode 1: Voronoi & Delaunay.
+
+[![Three problems. One word. — Wawa Sensei](https://img.youtube.com/vi/ywYOIk3rgHw/maxresdefault.jpg)](https://youtu.be/ywYOIk3rgHw)
+
 A small world held in glass. Vite + vanilla TypeScript, Three 0.186.0 WebGPU/TSL, and Rapier. The main page uses the same level-3 terrain, Worley caustics, and radial Voronoi fracture generators as the Lab.
 
 ## Run
